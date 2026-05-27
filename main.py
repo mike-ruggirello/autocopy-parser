@@ -19,17 +19,17 @@ def _require_env(name: str) -> str:
     return val
 
 
-SUPABASE_URL    = _require_env("SUPABASE_URL")
-SUPABASE_KEY    = _require_env("SUPABASE_SERVICE_KEY")
-OPENAI_API_KEY  = _require_env("OPENAI_API_KEY")
-WEBHOOK_API_KEY = _require_env("WEBHOOK_API_KEY")
-AUTOCOPY_SCHEMA = os.environ.get("AUTOCOPY_SCHEMA", "autocopy")
+SUPABASE_URL       = _require_env("SUPABASE_URL")
+SUPABASE_KEY       = _require_env("SUPABASE_SERVICE_KEY")
+ANTHROPIC_API_KEY  = _require_env("ANTHROPIC_API_KEY")
+WEBHOOK_API_KEY    = _require_env("WEBHOOK_API_KEY")
+AUTOCOPY_SCHEMA    = os.environ.get("AUTOCOPY_SCHEMA", "autocopy")
 
-app = FastAPI(title="AutoCopy Asset Parser", version="2.0.0")
+app = FastAPI(title="AutoCopy Asset Parser", version="3.0.0")
 extractor = MarketingAssetExtractor(
     supabase_url=SUPABASE_URL,
     supabase_key=SUPABASE_KEY,
-    openai_api_key=OPENAI_API_KEY,
+    anthropic_api_key=ANTHROPIC_API_KEY,
     schema=AUTOCOPY_SCHEMA,
 )
 
@@ -38,14 +38,14 @@ class ParseRequest(BaseModel):
     filename: str
     file_b64: str
     brand: str
-    state: str                              # 'CA', 'NY', 'multistate', etc.
-    category: Optional[str] = None          # 'Vapes', 'Pre-Rolls', etc.
-    product: Optional[str] = None           # 'Lights Out Cloudberry', '510', etc.
-    asset_type: Optional[str] = None        # 'Print', 'Partner Guide', etc.
-    source_path: Optional[str] = None       # full Dropbox path for traceability
-    state_list: Optional[list[str]] = None  # only for multistate rows
+    state: str
+    category: Optional[str] = None
+    product: Optional[str] = None
+    asset_type: Optional[str] = None
+    source_path: Optional[str] = None
+    state_list: Optional[list[str]] = None
     is_multistate: bool = False
-    auto_provision: bool = True             # create silo if missing
+    auto_provision: bool = True
 
 
 class ParseResponse(BaseModel):
@@ -61,7 +61,7 @@ class ParseResponse(BaseModel):
 
 @app.get("/")
 def health():
-    return {"status": "ok", "service": "autocopy-parser", "schema": AUTOCOPY_SCHEMA}
+    return {"status": "ok", "service": "autocopy-parser", "schema": AUTOCOPY_SCHEMA, "model": "claude-haiku-4-5"}
 
 
 @app.get("/health")

@@ -1,11 +1,10 @@
 """
-Marketing asset extractor v2 — schema-isolated, silo-routed.
+Marketing asset extractor v3 — Claude + no embeddings.
 
-Differences from v1:
-  - Routes inserts to autocopy.<table_name> based on (brand, state) registry lookup
-  - Auto-provisions the silo via autocopy.create_silo() if it doesn't exist
-  - Sends Content-Profile: autocopy on every Supabase REST call
-  - Stamps brand, state, category, product, asset_type, source_path on each row
+Differences from v2:
+  - Uses Anthropic API (claude-haiku-4-5) instead of OpenAI for structured extraction
+  - Drops the embedding step entirely; content_embedding stays NULL in DB
+  - search_brand_state RPC uses Postgres FTS, doesn't need embeddings
 """
 
 import json
@@ -16,7 +15,7 @@ from io import BytesIO
 from typing import Dict, List, Any, Optional
 
 import pdfplumber
-import openai
+import anthropic
 import requests
 
 warnings.filterwarnings("ignore", category=UserWarning, module="pdfminer")
@@ -24,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 class MarketingAssetExtractor:
-    def __init__(self, supabase_url: str, supabase_key: str, openai_api_key: str, schema: str = "autocopy"):
+    def __init__(self, supabase_url: str, supabase_key: str, anthropic_api_key: str, schema: str = "autocopy"):
         self.supabase_url = supabase_url.rstrip("/")
         self.supabase_key = supabase_key
         self.schema = schema
@@ -36,8 +35,8 @@ class MarketingAssetExtractor:
             "Accept-Profile": schema,
             "Prefer": "return=representation",
         }
-        self.openai_client = openai.OpenAI(api_key=openai_api_key)
-        # In-process cache: (brand, state) -> table_name
+        self.anthropic_client = anthropic.Anthropic(api_key=anthropic_api_key)
+        self.model = "claude-haiku-4-5-20251001"
         self._silo_cache: Dict[str, str] = {}
 
     # ─────────── Silo routing ───────────
@@ -50,12 +49,7 @@ class MarketingAssetExtractor:
         if key in self._silo_cache:
             return self._silo_cache[key]
         url = f"{self.supabase_url}/rest/v1/silo_registry"
-        params = {
-            "select": "table_name",
-            "brand": f"eq.{brand}",
-            "state": f"eq.{state}",
-            "limit": 1,
-        }
+        params = {"select": "table_name", "brand": f"eq.{brand}", "state": f"eq.{state}", "limit": 1}
         r = requests.get(url, headers=self.base_headers, params=params, timeout=15)
         if r.status_code != 200:
             logger.error(f"silo lookup failed: {r.status_code} {r.text[:300]}")
@@ -69,18 +63,13 @@ class MarketingAssetExtractor:
         return table
 
     def provision_silo(
-        self,
-        brand: str,
-        state: str,
-        is_multistate: bool = False,
-        state_list: Optional[List[str]] = None,
+        self, brand: str, state: str,
+        is_multistate: bool = False, state_list: Optional[List[str]] = None,
     ) -> Optional[str]:
         url = f"{self.supabase_url}/rest/v1/rpc/create_silo"
         body = {
-            "p_brand": brand,
-            "p_state": state,
-            "p_is_multistate": is_multistate,
-            "p_state_list": state_list,
+            "p_brand": brand, "p_state": state,
+            "p_is_multistate": is_multistate, "p_state_list": state_list,
         }
         r = requests.post(url, headers=self.base_headers, json=body, timeout=30)
         if r.status_code not in (200, 201):
@@ -94,11 +83,8 @@ class MarketingAssetExtractor:
         return None
 
     def get_or_create_silo(
-        self,
-        brand: str,
-        state: str,
-        is_multistate: bool = False,
-        state_list: Optional[List[str]] = None,
+        self, brand: str, state: str,
+        is_multistate: bool = False, state_list: Optional[List[str]] = None,
         auto_provision: bool = True,
     ) -> Optional[str]:
         existing = self.lookup_silo(brand, state)
@@ -107,24 +93,6 @@ class MarketingAssetExtractor:
         if not auto_provision:
             return None
         return self.provision_silo(brand, state, is_multistate, state_list)
-
-    # ─────────── Embeddings ───────────
-
-    def generate_embedding(self, text: str) -> Optional[List[float]]:
-        try:
-            clean = text.replace("\n", " ").replace("\r", " ").strip()
-            if not clean:
-                return None
-            if len(clean) > 8000:
-                clean = clean[:8000]
-            r = self.openai_client.embeddings.create(
-                model="text-embedding-3-large",
-                input=clean,
-            )
-            return r.data[0].embedding
-        except Exception as e:
-            logger.error(f"embedding failed: {e}")
-            return None
 
     # ─────────── PDF parsing ───────────
 
@@ -159,22 +127,36 @@ class MarketingAssetExtractor:
             logger.error(f"pdf read failed for {filename}: {e}")
         return pages_data
 
-    # ─────────── OpenAI block extractors ───────────
+    # ─────────── Claude JSON extraction ───────────
 
-    def _openai_json(self, system: str, user: str) -> Optional[Dict[str, Any]]:
+    def _claude_json(self, system: str, user: str) -> Optional[Dict[str, Any]]:
         try:
-            r = self.openai_client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-                temperature=0.1,
+            msg = self.anthropic_client.messages.create(
+                model=self.model,
                 max_tokens=2000,
-                response_format={"type": "json_object"},
+                system=system + " Output ONLY valid JSON. No prose before or after, no markdown code fences. Start with { and end with }.",
+                messages=[{"role": "user", "content": user}],
             )
-            raw = r.choices[0].message.content or "{}"
-            cleaned = raw.replace("```json", "").replace("```", "").strip()
-            return json.loads(cleaned)
+            raw = ""
+            for block in msg.content:
+                if hasattr(block, "text"):
+                    raw += block.text
+            raw = (raw or "").strip()
+            # Strip code fences if Claude wrapped them anyway
+            raw = raw.replace("```json", "").replace("```", "").strip()
+            # Extract from first { to last } to be robust to leading/trailing prose
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start >= 0 and end > start:
+                raw = raw[start:end + 1]
+            if not raw:
+                return None
+            return json.loads(raw)
+        except json.JSONDecodeError as e:
+            logger.error(f"claude returned non-JSON: {e}; raw={raw[:300]!r}")
+            return None
         except Exception as e:
-            logger.error(f"openai json call failed: {e}")
+            logger.error(f"claude json call failed: {e}")
             return None
 
     def extract_pricing_data(self, tables: List[Dict], text: str, brand: str) -> List[Dict]:
@@ -187,7 +169,7 @@ class MarketingAssetExtractor:
             'Return: {"products":[{"product_name":"...","sku":"...","thc_percentage":"...","price":"...",'
             '"case_pack":"...","unit_size":"...","product_format":"...","strain_type":"...","key_features":[]}]}'
         )
-        data = self._openai_json("Extract pricing data. Return only valid JSON.", prompt)
+        data = self._claude_json("Extract pricing data. Return only valid JSON.", prompt)
         out = []
         for product in (data or {}).get("products", []) or []:
             out.append({
@@ -207,9 +189,9 @@ class MarketingAssetExtractor:
         return out
 
     def extract_technical_content(self, text: str, brand: str) -> List[Dict]:
-        if len(text) < 200 or not any(
+        if len(text) < 150 or not any(
             k in text.lower()
-            for k in ["extract", "process", "manufacturing", "cultivation", "thc", "cbd", "terpene", "strain"]
+            for k in ["extract", "process", "manufactur", "cultivat", "thc", "cbd", "terpene", "strain", "potency", "mg"]
         ):
             return []
         prompt = (
@@ -220,7 +202,7 @@ class MarketingAssetExtractor:
             '"cultivation_method":"...","equipment":[],"process_details":"...","key_features":[],'
             '"extraction_keywords":[]}]}\n\nIf none: {"technical_blocks":[]}'
         )
-        data = self._openai_json("Extract technical specifications. Return only valid JSON.", prompt)
+        data = self._claude_json("Extract technical specifications. Return only valid JSON.", prompt)
         out = []
         for block in (data or {}).get("technical_blocks", []) or []:
             block["brand"] = brand
@@ -228,8 +210,8 @@ class MarketingAssetExtractor:
         return out
 
     def extract_product_details(self, text: str, brand: str) -> List[Dict]:
-        if len(text) < 200 or not any(
-            k in text.lower() for k in ["product", "strain", "flavor", "effect", "available", "line"]
+        if len(text) < 100 or not any(
+            k in text.lower() for k in ["product", "strain", "flavor", "effect", "available", "line", "tincture", "cart", "edible", "pre-roll", "flower"]
         ):
             return []
         prompt = (
@@ -240,7 +222,7 @@ class MarketingAssetExtractor:
             '"sizes":[],"formats":[],"key_features":[],"target_use":"...","extraction_keywords":[]}]}\n\n'
             'If none: {"product_blocks":[]}'
         )
-        data = self._openai_json("Extract product details. Return only valid JSON.", prompt)
+        data = self._claude_json("Extract product details. Return only valid JSON.", prompt)
         out = []
         for block in (data or {}).get("product_blocks", []) or []:
             block["brand"] = brand
@@ -248,8 +230,8 @@ class MarketingAssetExtractor:
         return out
 
     def extract_brand_content(self, text: str, brand: str) -> List[Dict]:
-        if len(text) < 200 or not any(
-            k in text.lower() for k in ["mission", "story", "quality", "commitment", "experience", "craft"]
+        if len(text) < 100 or not any(
+            k in text.lower() for k in ["mission", "story", "quality", "commitment", "experience", "craft", "introducing", "welcome", "premium", "luxury"]
         ):
             return []
         prompt = (
@@ -259,7 +241,7 @@ class MarketingAssetExtractor:
             '"positioning":"...","values":[],"quality_claims":[],"target_audience":"...",'
             '"competitive_advantages":[],"extraction_keywords":[]}]}\n\nIf none: {"brand_blocks":[]}'
         )
-        data = self._openai_json("Extract brand messaging. Return only valid JSON.", prompt)
+        data = self._claude_json("Extract brand messaging. Return only valid JSON.", prompt)
         out = []
         for block in (data or {}).get("brand_blocks", []) or []:
             block["brand"] = brand
@@ -271,7 +253,7 @@ class MarketingAssetExtractor:
         if page_data.get("tables"):
             blocks.extend(self.extract_pricing_data(page_data["tables"], page_data["text"], brand))
         text = page_data.get("text") or ""
-        if text and len(text) > 100:
+        if text and len(text) > 50:
             blocks.extend(self.extract_technical_content(text, brand))
             blocks.extend(self.extract_product_details(text, brand))
             blocks.extend(self.extract_brand_content(text, brand))
@@ -371,30 +353,18 @@ class MarketingAssetExtractor:
         if block.get("cbd_range"):      out.append(f"CBD: {block['cbd_range']}")
         return out
 
-    # ─────────── Silo-aware DB write ───────────
+    # ─────────── DB write (no embeddings) ───────────
 
     def save_to_silo(
-        self,
-        silo_table: str,
-        blocks: List[Dict],
-        page_data: Dict,
-        *,
-        brand: str,
-        state: str,
-        category: Optional[str],
-        product: Optional[str],
-        asset_type: Optional[str],
-        source_path: Optional[str],
-        state_list: Optional[List[str]],
+        self, silo_table: str, blocks: List[Dict], page_data: Dict, *,
+        brand: str, state: str, category: Optional[str], product: Optional[str],
+        asset_type: Optional[str], source_path: Optional[str], state_list: Optional[List[str]],
     ) -> int:
         saved = 0
         url = f"{self.supabase_url}/rest/v1/{silo_table}"
         for block in blocks:
             content_text = self.build_content_text(block)
             if not content_text or len(content_text) < 20:
-                continue
-            content_embedding = self.generate_embedding(content_text)
-            if not content_embedding:
                 continue
             row = {
                 "source_document":               page_data["source_document"],
@@ -409,7 +379,6 @@ class MarketingAssetExtractor:
                 "content_type":                  block.get("content_type"),
                 "content_text":                  content_text,
                 "extraction_keywords":           block.get("extraction_keywords", []),
-                "content_embedding":             content_embedding,
                 "raw_text":                      (page_data.get("text") or "")[:5000],
                 "comprehensive_technical_data":  self.build_technical_data(block),
                 "comprehensive_product_data":    self.build_product_data(block),
@@ -432,17 +401,11 @@ class MarketingAssetExtractor:
     # ─────────── Entry point ───────────
 
     def process_pdf_bytes(
-        self,
-        pdf_bytes: bytes,
-        filename: str,
-        brand: str,
-        state: str,
-        category: Optional[str] = None,
-        product: Optional[str] = None,
-        asset_type: Optional[str] = None,
-        source_path: Optional[str] = None,
-        state_list: Optional[List[str]] = None,
-        is_multistate: bool = False,
+        self, pdf_bytes: bytes, filename: str,
+        brand: str, state: str,
+        category: Optional[str] = None, product: Optional[str] = None,
+        asset_type: Optional[str] = None, source_path: Optional[str] = None,
+        state_list: Optional[List[str]] = None, is_multistate: bool = False,
         auto_provision: bool = True,
     ) -> Dict[str, Any]:
         silo_table = self.get_or_create_silo(
@@ -466,7 +429,7 @@ class MarketingAssetExtractor:
                     brand=brand, state=state, category=category, product=product,
                     asset_type=asset_type, source_path=source_path, state_list=state_list,
                 )
-            time.sleep(0.5)
+            time.sleep(0.3)
 
         return {
             "brand": brand, "state": state, "silo_table": silo_table,
