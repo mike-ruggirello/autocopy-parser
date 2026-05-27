@@ -228,14 +228,18 @@ class MarketingAssetExtractor:
 
     # ─────────── Matcher integration ───────────
 
-    def _call_matcher(self, brand: str, candidate: str, context: str, content_type: str) -> Dict[str, Any]:
+    def _call_matcher(self, brand: str, candidate: str, context: str, content_type: str,
+                      primary_product: str = "") -> Dict[str, Any]:
         """POST to n8n matcher webhook. Returns the verdict dict or 'unknown' on error."""
         if not self.matcher_url:
             return {"decision": "unknown", "reason": "matcher_url not configured"}
         try:
             r = requests.post(
                 self.matcher_url,
-                json={"brand": brand, "candidate": candidate, "context": context, "content_type": content_type},
+                json={
+                    "brand": brand, "candidate": candidate, "context": context,
+                    "content_type": content_type, "primary_product": primary_product,
+                },
                 timeout=30,
             )
             if r.status_code != 200:
@@ -246,7 +250,8 @@ class MarketingAssetExtractor:
             logger.error(f"matcher call failed: {e}")
             return {"decision": "unknown", "reason": str(e)}
 
-    def match_blocks(self, blocks: List[Dict], brand: str, page_text: str, filename: str = "") -> List[Dict]:
+    def match_blocks(self, blocks: List[Dict], brand: str, page_text: str,
+                     filename: str = "", primary_product: str = "") -> List[Dict]:
         """
         For each block: call matcher, apply routing rule.
           matched      -> stamp canonical product/subcategory, keep
@@ -254,18 +259,15 @@ class MarketingAssetExtractor:
           cross_product -> drop
           unknown      -> keep with original (fallback)
         Cache per (brand, candidate.lower()) to avoid duplicate matcher calls.
-        Context sent to matcher: filename + full page text, so matcher knows the document's
-        primary subject and can detect cross-product mentions.
+        Context sent to matcher: filename + full page text + primary_product, so matcher
+        knows the document's primary subject and can detect cross-product mentions.
         """
         out = []
         cache: Dict[tuple, Dict] = {}
-        # Build rich shared context for this page - filename signals what the doc is about,
-        # full page text signals what THIS page is about
         page_ctx = f"DOCUMENT: {filename}\n\nPAGE CONTENT:\n{(page_text or '')[:3000]}"
         for block in blocks:
             candidate = (block.get("product_name") or block.get("product_line") or "").strip()
             content_type = block.get("content_type", "")
-            # brand_messaging blocks: don't need a product, skip matcher entirely
             if content_type == "brand_messaging" and not candidate:
                 block["product_name"] = None
                 block["_matcher_decision"] = "brand_messaging_no_candidate"
@@ -278,7 +280,9 @@ class MarketingAssetExtractor:
 
             cache_key = (brand, candidate.lower())
             if cache_key not in cache:
-                cache[cache_key] = self._call_matcher(brand, candidate, page_ctx, content_type)
+                cache[cache_key] = self._call_matcher(
+                    brand, candidate, page_ctx, content_type, primary_product=primary_product
+                )
             verdict = cache[cache_key]
             decision = verdict.get("decision", "unknown")
             block["_matcher_decision"] = decision
@@ -436,7 +440,10 @@ class MarketingAssetExtractor:
             if not blocks:
                 continue
             # Apply matcher to filter/relabel blocks
-            blocks = self.match_blocks(blocks, brand, page_data.get("text", ""), filename=filename)
+            blocks = self.match_blocks(
+                blocks, brand, page_data.get("text", ""),
+                filename=filename, primary_product=product or "",
+            )
             if not blocks:
                 continue
             total_saved += self.save_to_silo(
