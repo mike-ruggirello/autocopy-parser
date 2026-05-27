@@ -19,18 +19,20 @@ def _require_env(name: str) -> str:
     return val
 
 
-SUPABASE_URL       = _require_env("SUPABASE_URL")
-SUPABASE_KEY       = _require_env("SUPABASE_SERVICE_KEY")
-ANTHROPIC_API_KEY  = _require_env("ANTHROPIC_API_KEY")
-WEBHOOK_API_KEY    = _require_env("WEBHOOK_API_KEY")
-AUTOCOPY_SCHEMA    = os.environ.get("AUTOCOPY_SCHEMA", "autocopy")
+SUPABASE_URL          = _require_env("SUPABASE_URL")
+SUPABASE_KEY          = _require_env("SUPABASE_SERVICE_KEY")
+ANTHROPIC_API_KEY     = _require_env("ANTHROPIC_API_KEY")
+WEBHOOK_API_KEY       = _require_env("WEBHOOK_API_KEY")
+AUTOCOPY_SCHEMA       = os.environ.get("AUTOCOPY_SCHEMA", "autocopy")
+AUTOCOPY_MATCHER_URL  = os.environ.get("AUTOCOPY_MATCHER_URL")  # optional - if absent, no matching
 
-app = FastAPI(title="AutoCopy Asset Parser", version="3.0.0")
+app = FastAPI(title="AutoCopy Asset Parser", version="4.0.0")
 extractor = MarketingAssetExtractor(
     supabase_url=SUPABASE_URL,
     supabase_key=SUPABASE_KEY,
     anthropic_api_key=ANTHROPIC_API_KEY,
     schema=AUTOCOPY_SCHEMA,
+    matcher_url=AUTOCOPY_MATCHER_URL,
 )
 
 
@@ -61,7 +63,8 @@ class ParseResponse(BaseModel):
 
 @app.get("/")
 def health():
-    return {"status": "ok", "service": "autocopy-parser", "schema": AUTOCOPY_SCHEMA, "model": "claude-haiku-4-5"}
+    return {"status": "ok", "service": "autocopy-parser", "schema": AUTOCOPY_SCHEMA,
+            "model": "claude-haiku-4-5", "matcher": bool(AUTOCOPY_MATCHER_URL)}
 
 
 @app.get("/health")
@@ -93,33 +96,19 @@ def parse(payload: ParseRequest, x_api_key: str = Header(default="")):
 
     try:
         result = extractor.process_pdf_bytes(
-            pdf_bytes=pdf_bytes,
-            filename=payload.filename,
-            brand=payload.brand,
-            state=payload.state,
-            category=payload.category,
-            product=payload.product,
-            asset_type=payload.asset_type,
-            source_path=payload.source_path,
-            state_list=payload.state_list,
-            is_multistate=payload.is_multistate,
+            pdf_bytes=pdf_bytes, filename=payload.filename,
+            brand=payload.brand, state=payload.state,
+            category=payload.category, product=payload.product,
+            asset_type=payload.asset_type, source_path=payload.source_path,
+            state_list=payload.state_list, is_multistate=payload.is_multistate,
             auto_provision=payload.auto_provision,
         )
-        return ParseResponse(
-            status="ok",
-            filename=payload.filename,
-            silo_table=result.get("silo_table"),
-            brand=result.get("brand"),
-            state=result.get("state"),
-            pages=result.get("pages", 0),
-            blocks_saved=result.get("blocks_saved", 0),
-        )
+        return ParseResponse(status="ok", filename=payload.filename,
+                             silo_table=result.get("silo_table"),
+                             brand=result.get("brand"), state=result.get("state"),
+                             pages=result.get("pages", 0),
+                             blocks_saved=result.get("blocks_saved", 0))
     except Exception as e:
         logger.exception("parse failed")
-        return ParseResponse(
-            status="error",
-            filename=payload.filename,
-            brand=payload.brand,
-            state=payload.state,
-            error=str(e),
-        )
+        return ParseResponse(status="error", filename=payload.filename,
+                             brand=payload.brand, state=payload.state, error=str(e))
