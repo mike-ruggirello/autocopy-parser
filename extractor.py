@@ -246,7 +246,7 @@ class MarketingAssetExtractor:
             logger.error(f"matcher call failed: {e}")
             return {"decision": "unknown", "reason": str(e)}
 
-    def match_blocks(self, blocks: List[Dict], brand: str, page_text: str) -> List[Dict]:
+    def match_blocks(self, blocks: List[Dict], brand: str, page_text: str, filename: str = "") -> List[Dict]:
         """
         For each block: call matcher, apply routing rule.
           matched      -> stamp canonical product/subcategory, keep
@@ -254,9 +254,14 @@ class MarketingAssetExtractor:
           cross_product -> drop
           unknown      -> keep with original (fallback)
         Cache per (brand, candidate.lower()) to avoid duplicate matcher calls.
+        Context sent to matcher: filename + full page text, so matcher knows the document's
+        primary subject and can detect cross-product mentions.
         """
         out = []
         cache: Dict[tuple, Dict] = {}
+        # Build rich shared context for this page - filename signals what the doc is about,
+        # full page text signals what THIS page is about
+        page_ctx = f"DOCUMENT: {filename}\n\nPAGE CONTENT:\n{(page_text or '')[:3000]}"
         for block in blocks:
             candidate = (block.get("product_name") or block.get("product_line") or "").strip()
             content_type = block.get("content_type", "")
@@ -273,13 +278,7 @@ class MarketingAssetExtractor:
 
             cache_key = (brand, candidate.lower())
             if cache_key not in cache:
-                # Build context from block content
-                ctx_parts = []
-                if block.get("description"): ctx_parts.append(block["description"])
-                if block.get("title"): ctx_parts.append(block["title"])
-                if block.get("brand_story"): ctx_parts.append(block["brand_story"])
-                ctx = " | ".join(ctx_parts)[:500] or page_text[:500]
-                cache[cache_key] = self._call_matcher(brand, candidate, ctx, content_type)
+                cache[cache_key] = self._call_matcher(brand, candidate, page_ctx, content_type)
             verdict = cache[cache_key]
             decision = verdict.get("decision", "unknown")
             block["_matcher_decision"] = decision
@@ -437,7 +436,7 @@ class MarketingAssetExtractor:
             if not blocks:
                 continue
             # Apply matcher to filter/relabel blocks
-            blocks = self.match_blocks(blocks, brand, page_data.get("text", ""))
+            blocks = self.match_blocks(blocks, brand, page_data.get("text", ""), filename=filename)
             if not blocks:
                 continue
             total_saved += self.save_to_silo(
