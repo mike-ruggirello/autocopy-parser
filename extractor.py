@@ -9,6 +9,7 @@ v4 changes:
 """
 
 import os
+import re
 import json
 import time
 import warnings
@@ -293,14 +294,17 @@ class MarketingAssetExtractor:
                 block["_matched_subcategory"] = verdict.get("subcategory")
                 block["_matched_category"] = verdict.get("category")
                 out.append(block)
-            elif decision == "brand_level":
+            elif decision == "brand_level" or decision == "no_match":
+                # No real product matched. Don't fall back to the raw candidate text
+                # (it's often a tagline fragment like "HYPED & HIGH" or "LOW"), set null.
                 block["product_name"] = None
                 out.append(block)
             elif decision == "cross_product":
                 logger.info(f"dropped cross-product mention: brand={brand!r} candidate={candidate!r}")
                 continue
             else:
-                # unknown / matcher error: keep with original product_name
+                # unknown / matcher error: treat same as brand_level rather than leaking raw candidate
+                block["product_name"] = None
                 out.append(block)
         return out
 
@@ -411,6 +415,61 @@ class MarketingAssetExtractor:
 
     # ─────────── Entry point ───────────
 
+    def resolve_file_level_sku(self, filename: str, asset_type: str, brand: str,
+                                 primary_product: str) -> Optional[Dict[str, Any]]:
+        """For single-SKU files (sell sheets, postcards, table tents with specific variants),
+        resolve the SKU once from the filename and reuse for every block. Returns None for
+        multi-SKU files (training decks, partner guides, launch decks, 'combined' files) so
+        the parser falls back to per-block matching.
+        """
+        if not filename:
+            return None
+
+        # Multi-SKU asset types - these intentionally cover multiple products per file
+        multi_sku_asset_types = {"training deck", "partner guide", "launch deck", "education", "deck"}
+        if asset_type and asset_type.lower().strip() in multi_sku_asset_types:
+            return None
+
+        # Strip extension, version suffixes, asset-type words from filename
+        stem = filename.rsplit(".", 1)[0]
+        # 'Combined' files cover multiple SKUs
+        if "combined" in stem.lower():
+            return None
+
+        # Build a clean descriptor: drop brand/state code prefix and asset-type/version words
+        descriptor = stem
+        # Strip common prefix patterns like "HH_NY_" or "HH_CA_"
+        descriptor = re.sub(r"^HH[_ ]?[A-Z]{2}[_ ]?", "", descriptor, flags=re.IGNORECASE)
+        # Strip asset-type and trailing version words
+        strip_words = [
+            "sell sheet", "sellsheet", "postcard", "post card",
+            "tabletent", "table tent", "tradeshow", "trade show",
+            "partner guide", "partnerguide", "training deck", "launch deck",
+            "withcrops", "with crops", "crops", "final", "draft",
+        ]
+        for w in strip_words:
+            descriptor = re.sub(re.escape(w), " ", descriptor, flags=re.IGNORECASE)
+        # Strip version numbers like "_1.2", "_v3", "_1.1"
+        descriptor = re.sub(r"[_ ]+v?\d+(\.\d+)*", " ", descriptor)
+        # Replace separators with spaces
+        descriptor = re.sub(r"[_\-&]+", " ", descriptor)
+        descriptor = re.sub(r"\s+", " ", descriptor).strip()
+
+        if len(descriptor) < 3:
+            return None
+
+        verdict = self._call_matcher(
+            brand=brand,
+            candidate=descriptor,
+            context=f"DOCUMENT: {filename}",
+            content_type="file_level",
+            primary_product=primary_product,
+        )
+        if verdict.get("decision") == "matched":
+            logger.info(f"file-level SKU resolved: {filename!r} -> {verdict.get('product_name')!r}")
+            return verdict
+        return None
+
     def process_pdf_bytes(self, pdf_bytes, filename, brand, state, category=None, product=None,
                          asset_type=None, source_path=None, state_list=None, is_multistate=False,
                          auto_provision=True):
@@ -423,16 +482,30 @@ class MarketingAssetExtractor:
         if not pages:
             return {"brand": brand, "state": state, "silo_table": silo_table, "pages": 0, "blocks_saved": 0}
 
+        # File-level SKU resolution: single-SKU files get matched once, applied to all blocks
+        file_verdict = self.resolve_file_level_sku(filename, asset_type or "", brand, product or "")
+
         total_saved = 0
         for page_data in pages:
             blocks = self.extract_all_content(page_data, brand)
             if not blocks:
                 continue
-            # Apply matcher to filter/relabel blocks
-            blocks = self.match_blocks(
-                blocks, brand, page_data.get("text", ""),
-                filename=filename, primary_product=product or "",
-            )
+
+            if file_verdict:
+                # Stamp the file-level SKU onto every block, skip per-block matching
+                for block in blocks:
+                    block["_matcher_decision"] = "matched"
+                    block["product_name"] = file_verdict.get("product_line") or file_verdict.get("product_name")
+                    block["_matched_inventory_id"] = file_verdict.get("inventory_id")
+                    block["_matched_subcategory"] = file_verdict.get("subcategory")
+                    block["_matched_category"] = file_verdict.get("category")
+            else:
+                # Fall back to per-block matching for multi-SKU files
+                blocks = self.match_blocks(
+                    blocks, brand, page_data.get("text", ""),
+                    filename=filename, primary_product=product or "",
+                )
+
             if not blocks:
                 continue
             total_saved += self.save_to_silo(
@@ -443,4 +516,5 @@ class MarketingAssetExtractor:
             time.sleep(0.3)
 
         return {"brand": brand, "state": state, "silo_table": silo_table,
-                "pages": len(pages), "blocks_saved": total_saved}
+                "pages": len(pages), "blocks_saved": total_saved,
+                "file_level_match": file_verdict.get("inventory_id") if file_verdict else None}
