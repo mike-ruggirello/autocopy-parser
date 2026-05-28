@@ -389,6 +389,7 @@ class MarketingAssetExtractor:
                 "state":                        state,
                 "state_list":                   state_list,
                 "category":                     row_category,
+                "campaign":                     product,
                 "product_name":                 block.get("product_name"),
                 "asset_type":                   asset_type,
                 "content_type":                 block.get("content_type"),
