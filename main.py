@@ -1,9 +1,10 @@
 import os
+import json
 import base64
 import logging
 from typing import Optional
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
 
 from extractor import MarketingAssetExtractor
@@ -112,3 +113,59 @@ def parse(payload: ParseRequest, x_api_key: str = Header(default="")):
         logger.exception("parse failed")
         return ParseResponse(status="error", filename=payload.filename,
                              brand=payload.brand, state=payload.state, error=str(e))
+
+
+@app.post("/parse-upload", response_model=ParseResponse)
+async def parse_upload(
+    file: UploadFile = File(...),
+    filename: str = Form(...),
+    brand: str = Form(...),
+    state: str = Form(...),
+    category: Optional[str] = Form(None),
+    product: Optional[str] = Form(None),
+    asset_type: Optional[str] = Form(None),
+    source_path: Optional[str] = Form(None),
+    state_list: Optional[str] = Form(None),
+    is_multistate: bool = Form(False),
+    auto_provision: bool = Form(True),
+    x_api_key: str = Header(default=""),
+):
+    """Multipart-upload version of /parse. Skips base64 encoding to avoid n8n's 60s Code-node timeout."""
+    if x_api_key != WEBHOOK_API_KEY:
+        raise HTTPException(status_code=401, detail="invalid api key")
+
+    pdf_bytes = await file.read()
+    if len(pdf_bytes) < 100 or not pdf_bytes.startswith(b"%PDF"):
+        raise HTTPException(status_code=400, detail="payload is not a PDF")
+
+    state_list_parsed: Optional[list[str]] = None
+    if state_list:
+        try:
+            state_list_parsed = json.loads(state_list) if state_list.startswith("[") \
+                                else [s.strip() for s in state_list.split(",") if s.strip()]
+        except Exception:
+            state_list_parsed = [s.strip() for s in state_list.split(",") if s.strip()]
+
+    logger.info(
+        "parse-upload start: filename=%r brand=%r state=%r category=%r product=%r size=%d",
+        filename, brand, state, category, product, len(pdf_bytes),
+    )
+
+    try:
+        result = extractor.process_pdf_bytes(
+            pdf_bytes=pdf_bytes, filename=filename,
+            brand=brand, state=state,
+            category=category, product=product,
+            asset_type=asset_type, source_path=source_path,
+            state_list=state_list_parsed, is_multistate=is_multistate,
+            auto_provision=auto_provision,
+        )
+        return ParseResponse(status="ok", filename=filename,
+                             silo_table=result.get("silo_table"),
+                             brand=result.get("brand"), state=result.get("state"),
+                             pages=result.get("pages", 0),
+                             blocks_saved=result.get("blocks_saved", 0))
+    except Exception as e:
+        logger.exception("parse-upload failed")
+        return ParseResponse(status="error", filename=filename,
+                             brand=brand, state=state, error=str(e))
