@@ -307,36 +307,25 @@ class MarketingAssetExtractor:
     # ─────────── Content text building ───────────
 
     def build_content_text(self, block):
+        """Return only natural-language marketing prose from the page.
+        No metadata labels (Brand:, Product:, Flavors: etc) - those live in JSON cols.
+        No matched product_name (it gets overwritten post-extraction, contaminating training data).
+        Pricing data has no creative copy - return empty so the min-length filter drops it.
+        """
         parts = []
-        if block.get("brand"): parts.append(f"Brand: {block['brand']}")
         ct = block.get("content_type", "")
-        if ct == "pricing_data":
-            if block.get("product_name"):   parts.append(f"Product: {block['product_name']}")
-            if block.get("unit_size"):      parts.append(f"Size: {block['unit_size']}")
-            if block.get("product_format"): parts.append(f"Format: {block['product_format']}")
-            if block.get("thc_percentage"): parts.append(f"THC: {block['thc_percentage']}")
-            if block.get("price"):          parts.append(f"Wholesale Price: ${block['price']}")
-            if block.get("case_pack"):      parts.append(f"Case Pack: {block['case_pack']}")
-            if block.get("strain_type"):    parts.append(f"Type: {block['strain_type']}")
-        elif ct == "technical_specifications":
-            if block.get("title"):             parts.append(block["title"])
-            if block.get("process_details"):   parts.append(block["process_details"])
-            if block.get("extraction_method"): parts.append(f"Extraction: {block['extraction_method']}")
-            if block.get("thc_range"):         parts.append(f"THC: {block['thc_range']}")
-            if block.get("terpenes"):          parts.append(f"Terpenes: {', '.join(block['terpenes'])}")
-        elif ct == "product_details":
-            if block.get("product_line"): parts.append(f"Product Line: {block['product_line']}")
-            if block.get("product_name"): parts.append(f"Product: {block['product_name']}")
-            if block.get("description"):  parts.append(block["description"])
-            if block.get("flavors"):      parts.append(f"Flavors: {', '.join(block['flavors'])}")
-            if block.get("effects"):      parts.append(f"Effects: {', '.join(block['effects'])}")
-        elif ct == "brand_messaging":
+        if ct == "brand_messaging":
             if block.get("title"):       parts.append(block["title"])
             if block.get("brand_story"): parts.append(block["brand_story"])
             if block.get("positioning"): parts.append(block["positioning"])
-        if block.get("key_features"):
-            parts.append(f"Features: {', '.join(block['key_features'])}")
-        return ". ".join(parts)
+        elif ct == "product_details":
+            if block.get("description"): parts.append(block["description"])
+            if block.get("target_use"):  parts.append(block["target_use"])
+        elif ct == "technical_specifications":
+            if block.get("title"):           parts.append(block["title"])
+            if block.get("process_details"): parts.append(block["process_details"])
+        # pricing_data: structured numbers, no marketing prose -> empty -> dropped by min-length filter
+        return " ".join(p.strip() for p in parts if p and str(p).strip())
 
     def build_technical_data(self, block):
         if block.get("content_type") != "technical_specifications": return {}
