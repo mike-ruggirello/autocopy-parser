@@ -170,13 +170,20 @@ class MarketingAssetExtractor:
         if len(text) < 150 or not any(k in text.lower() for k in
             ["extract", "process", "manufactur", "cultivat", "thc", "cbd", "terpene", "strain", "potency", "mg"]):
             return []
-        prompt = (f"Extract technical specs and process details. Return ONLY valid JSON.\n\nBrand: {brand}\n\n"
-                  f"Text: {text[:3000]}\n\n"
-                  'Return: {"technical_blocks":[{"content_type":"technical_specifications","title":"...",'
-                  '"extraction_method":"...","thc_range":"...","cbd_range":"...","terpenes":[],"product_name":"...",'
-                  '"cultivation_method":"...","equipment":[],"process_details":"...","key_features":[],"extraction_keywords":[]}]}\n\n'
+        prompt = (f"Extract technical/process content from the marketing asset below. Return ONLY valid JSON.\n\n"
+                  f"CRITICAL RULES:\n"
+                  f"- 'verbatim_copy' MUST be text COPIED EXACTLY from the source. Do NOT paraphrase, summarize, rewrite, or generate new prose.\n"
+                  f"- Preserve original capitalization, punctuation, line breaks (use \\n), and word order.\n"
+                  f"- If the source says 'EXTRACTED WITHIN 30-60 DAYS' do NOT write 'extracted within 30-60 days of harvest'.\n"
+                  f"- If no technical content exists, return an empty array.\n\n"
+                  f"Brand: {brand}\n\n"
+                  f"Source text:\n{text[:3000]}\n\n"
+                  'Return: {"technical_blocks":[{"content_type":"technical_specifications",'
+                  '"verbatim_copy":"EXACT text copied from source — multiple sentences ok, separate with newlines",'
+                  '"title":"...","extraction_method":"...","thc_range":"...","cbd_range":"...","terpenes":[],"product_name":"...",'
+                  '"cultivation_method":"...","equipment":[],"key_features":[],"extraction_keywords":[]}]}\n\n'
                   'If none: {"technical_blocks":[]}')
-        data = self._claude_json("Extract technical specifications. Return only valid JSON.", prompt)
+        data = self._claude_json("Extract VERBATIM technical content. Copy text exactly as written. Never paraphrase. Return only valid JSON.", prompt)
         out = []
         for block in (data or {}).get("technical_blocks", []) or []:
             block["brand"] = brand
@@ -187,11 +194,20 @@ class MarketingAssetExtractor:
         if len(text) < 100 or not any(k in text.lower() for k in
             ["product", "strain", "flavor", "effect", "available", "line", "tincture", "cart", "edible", "pre-roll", "flower"]):
             return []
-        prompt = (f"Extract product details. Return ONLY valid JSON.\n\nBrand: {brand}\n\nText: {text[:3000]}\n\n"
-                  'Return: {"product_blocks":[{"content_type":"product_details","product_line":"...","product_name":"...",'
-                  '"description":"...","flavors":[],"effects":[],"strains":[],"sizes":[],"formats":[],"key_features":[],'
-                  '"target_use":"...","extraction_keywords":[]}]}\n\nIf none: {"product_blocks":[]}')
-        data = self._claude_json("Extract product details. Return only valid JSON.", prompt)
+        prompt = (f"Extract product copy from the marketing asset below. Return ONLY valid JSON.\n\n"
+                  f"CRITICAL RULES:\n"
+                  f"- 'verbatim_copy' MUST be text COPIED EXACTLY from the source. Do NOT paraphrase, summarize, or generate new prose.\n"
+                  f"- Preserve original capitalization, punctuation, line breaks (use \\n), and word order.\n"
+                  f"- Include headlines, taglines, body paragraphs, and callouts as they appear.\n"
+                  f"- If the source says 'HYPED & HIGH MINUS THE MUNCHIES' write it that way, not 'energy vape without appetite stimulation'.\n"
+                  f"- If no product copy exists, return an empty array.\n\n"
+                  f"Brand: {brand}\n\nSource text:\n{text[:3000]}\n\n"
+                  'Return: {"product_blocks":[{"content_type":"product_details",'
+                  '"verbatim_copy":"EXACT text copied from source — headlines, taglines, body, callouts separated by newlines",'
+                  '"product_line":"...","product_name":"...",'
+                  '"flavors":[],"effects":[],"strains":[],"sizes":[],"formats":[],"key_features":[],'
+                  '"extraction_keywords":[]}]}\n\nIf none: {"product_blocks":[]}')
+        data = self._claude_json("Extract VERBATIM product copy. Copy text exactly as written. Never paraphrase. Return only valid JSON.", prompt)
         out = []
         for block in (data or {}).get("product_blocks", []) or []:
             block["brand"] = brand
@@ -202,11 +218,20 @@ class MarketingAssetExtractor:
         if len(text) < 100 or not any(k in text.lower() for k in
             ["mission", "story", "quality", "commitment", "experience", "craft", "introducing", "welcome", "premium", "luxury"]):
             return []
-        prompt = (f"Extract brand messaging. Return ONLY valid JSON.\n\nBrand: {brand}\n\nText: {text[:3000]}\n\n"
-                  'Return: {"brand_blocks":[{"content_type":"brand_messaging","title":"...","brand_story":"...","product_name":null,'
-                  '"positioning":"...","values":[],"quality_claims":[],"target_audience":"...","competitive_advantages":[],'
+        prompt = (f"Extract brand voice and story content from the marketing asset below. Return ONLY valid JSON.\n\n"
+                  f"CRITICAL RULES:\n"
+                  f"- 'verbatim_copy' MUST be text COPIED EXACTLY from the source. Do NOT paraphrase, summarize, or generate new prose.\n"
+                  f"- Preserve original capitalization, punctuation, line breaks (use \\n), and word order.\n"
+                  f"- Include brand taglines, mission statements, body prose, and any brand-voice copy as it appears.\n"
+                  f"- If the source says 'CRAFTING PURITY SINCE 1996' do NOT write 'crafting purity since 1996'.\n"
+                  f"- If no brand content exists, return an empty array.\n\n"
+                  f"Brand: {brand}\n\nSource text:\n{text[:3000]}\n\n"
+                  'Return: {"brand_blocks":[{"content_type":"brand_messaging",'
+                  '"verbatim_copy":"EXACT text copied from source — multiple sentences/paragraphs separated by newlines",'
+                  '"title":"...","product_name":null,'
+                  '"values":[],"quality_claims":[],"competitive_advantages":[],'
                   '"extraction_keywords":[]}]}\n\nIf none: {"brand_blocks":[]}')
-        data = self._claude_json("Extract brand messaging. Return only valid JSON.", prompt)
+        data = self._claude_json("Extract VERBATIM brand voice copy. Copy text exactly as written. Never paraphrase. Return only valid JSON.", prompt)
         out = []
         for block in (data or {}).get("brand_blocks", []) or []:
             block["brand"] = brand
@@ -227,13 +252,18 @@ class MarketingAssetExtractor:
     # ─────────── Matcher integration ───────────
 
     def build_content_text(self, block):
-        """Return only natural-language marketing prose from the page.
-        No metadata labels (Brand:, Product:, Flavors: etc) - those live in JSON cols.
-        No matched product_name (it gets overwritten post-extraction, contaminating training data).
-        Pricing data has no creative copy - return empty so the min-length filter drops it.
+        """Return the verbatim copy extracted from the source PDF.
+        Claude is now instructed to copy text exactly — no summaries, no paraphrases.
+        Pricing data still has no creative copy — return empty so it gets dropped.
         """
-        parts = []
         ct = block.get("content_type", "")
+        if ct == "pricing_data":
+            return ""
+        verbatim = (block.get("verbatim_copy") or "").strip()
+        if verbatim:
+            return verbatim
+        # Fallback for any legacy block shape (no verbatim_copy field):
+        parts = []
         if ct == "brand_messaging":
             if block.get("title"):       parts.append(block["title"])
             if block.get("brand_story"): parts.append(block["brand_story"])
@@ -244,7 +274,6 @@ class MarketingAssetExtractor:
         elif ct == "technical_specifications":
             if block.get("title"):           parts.append(block["title"])
             if block.get("process_details"): parts.append(block["process_details"])
-        # pricing_data: structured numbers, no marketing prose -> empty -> dropped by min-length filter
         return " ".join(p.strip() for p in parts if p and str(p).strip())
 
     def build_technical_data(self, block):
