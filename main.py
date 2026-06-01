@@ -25,15 +25,13 @@ SUPABASE_KEY          = _require_env("SUPABASE_SERVICE_KEY")
 ANTHROPIC_API_KEY     = _require_env("ANTHROPIC_API_KEY")
 WEBHOOK_API_KEY       = _require_env("WEBHOOK_API_KEY")
 AUTOCOPY_SCHEMA       = os.environ.get("AUTOCOPY_SCHEMA", "autocopy")
-AUTOCOPY_MATCHER_URL  = os.environ.get("AUTOCOPY_MATCHER_URL")  # optional - if absent, no matching
 
-app = FastAPI(title="AutoCopy Asset Parser", version="4.0.0")
+app = FastAPI(title="AutoCopy Asset Parser", version="5.0.0")
 extractor = MarketingAssetExtractor(
     supabase_url=SUPABASE_URL,
     supabase_key=SUPABASE_KEY,
     anthropic_api_key=ANTHROPIC_API_KEY,
     schema=AUTOCOPY_SCHEMA,
-    matcher_url=AUTOCOPY_MATCHER_URL,
 )
 
 
@@ -65,7 +63,7 @@ class ParseResponse(BaseModel):
 @app.get("/")
 def health():
     return {"status": "ok", "service": "autocopy-parser", "schema": AUTOCOPY_SCHEMA,
-            "model": "claude-haiku-4-5", "matcher": bool(AUTOCOPY_MATCHER_URL)}
+            "model": "claude-haiku-4-5"}
 
 
 @app.get("/health")

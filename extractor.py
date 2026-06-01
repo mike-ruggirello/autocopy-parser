@@ -1,11 +1,11 @@
 """
-Marketing asset extractor v4 — Claude + matcher + no embeddings.
+Marketing asset extractor v5 — Claude block extraction, campaign-level routing.
 
-v4 changes:
-  - Calls n8n matcher webhook per unique candidate per page
-  - Drops cross-product mentions (matcher decision = 'cross_product')
-  - Clears product_name on brand-level concepts
-  - Stamps canonical subcategory from dash_products onto the category column
+v5 changes:
+  - Removed matcher webhook entirely (no SKU resolution)
+  - Removed product_name column from silo rows
+  - Bumped Claude max_tokens 2000 -> 8000 to avoid mid-sentence cutoffs
+  - Campaign (folder name) is the primary grouping field
 """
 
 import os
@@ -24,14 +24,11 @@ import requests
 warnings.filterwarnings("ignore", category=UserWarning, module="pdfminer")
 logger = logging.getLogger(__name__)
 
-
 class MarketingAssetExtractor:
-    def __init__(self, supabase_url: str, supabase_key: str, anthropic_api_key: str, schema: str = "autocopy",
-                 matcher_url: Optional[str] = None):
+    def __init__(self, supabase_url: str, supabase_key: str, anthropic_api_key: str, schema: str = "autocopy"):
         self.supabase_url = supabase_url.rstrip("/")
         self.supabase_key = supabase_key
         self.schema = schema
-        self.matcher_url = matcher_url
         self.base_headers = {
             "apikey": supabase_key,
             "Authorization": f"Bearer {supabase_key}",
@@ -130,7 +127,7 @@ class MarketingAssetExtractor:
         try:
             msg = self.anthropic_client.messages.create(
                 model=self.model,
-                max_tokens=2000,
+                max_tokens=8000,
                 system=system + " Output ONLY valid JSON. No prose before or after, no markdown code fences. Start with { and end with }.",
                 messages=[{"role": "user", "content": user}],
             )
@@ -229,87 +226,6 @@ class MarketingAssetExtractor:
 
     # ─────────── Matcher integration ───────────
 
-    def _call_matcher(self, brand: str, candidate: str, context: str, content_type: str,
-                      primary_product: str = "") -> Dict[str, Any]:
-        """POST to n8n matcher webhook. Returns the verdict dict or 'unknown' on error."""
-        if not self.matcher_url:
-            return {"decision": "unknown", "reason": "matcher_url not configured"}
-        try:
-            r = requests.post(
-                self.matcher_url,
-                json={
-                    "brand": brand, "candidate": candidate, "context": context,
-                    "content_type": content_type, "primary_product": primary_product,
-                },
-                timeout=30,
-            )
-            if r.status_code != 200:
-                logger.error(f"matcher returned {r.status_code}: {r.text[:200]}")
-                return {"decision": "unknown", "reason": f"http_{r.status_code}"}
-            return r.json()
-        except Exception as e:
-            logger.error(f"matcher call failed: {e}")
-            return {"decision": "unknown", "reason": str(e)}
-
-    def match_blocks(self, blocks: List[Dict], brand: str, page_text: str,
-                     filename: str = "", primary_product: str = "") -> List[Dict]:
-        """
-        For each block: call matcher, apply routing rule.
-          matched      -> stamp canonical product/subcategory, keep
-          brand_level  -> product_name=None, keep
-          cross_product -> drop
-          unknown      -> keep with original (fallback)
-        Cache per (brand, candidate.lower()) to avoid duplicate matcher calls.
-        Context sent to matcher: filename + full page text + primary_product, so matcher
-        knows the document's primary subject and can detect cross-product mentions.
-        """
-        out = []
-        cache: Dict[tuple, Dict] = {}
-        page_ctx = f"DOCUMENT: {filename}\n\nPAGE CONTENT:\n{(page_text or '')[:3000]}"
-        for block in blocks:
-            candidate = (block.get("product_name") or block.get("product_line") or "").strip()
-            content_type = block.get("content_type", "")
-            if content_type == "brand_messaging" and not candidate:
-                block["product_name"] = None
-                block["_matcher_decision"] = "brand_messaging_no_candidate"
-                out.append(block)
-                continue
-            if not candidate:
-                block["_matcher_decision"] = "no_candidate"
-                out.append(block)
-                continue
-
-            cache_key = (brand, candidate.lower())
-            if cache_key not in cache:
-                cache[cache_key] = self._call_matcher(
-                    brand, candidate, page_ctx, content_type, primary_product=primary_product
-                )
-            verdict = cache[cache_key]
-            decision = verdict.get("decision", "unknown")
-            block["_matcher_decision"] = decision
-
-            if decision == "matched":
-                block["product_name"] = verdict.get("product_line") or verdict.get("product_name") or candidate
-                block["_matched_inventory_id"] = verdict.get("inventory_id")
-                block["_matched_subcategory"] = verdict.get("subcategory")
-                block["_matched_category"] = verdict.get("category")
-                out.append(block)
-            elif decision == "brand_level" or decision == "no_match":
-                # No real product matched. Don't fall back to the raw candidate text
-                # (it's often a tagline fragment like "HYPED & HIGH" or "LOW"), set null.
-                block["product_name"] = None
-                out.append(block)
-            elif decision == "cross_product":
-                logger.info(f"dropped cross-product mention: brand={brand!r} candidate={candidate!r}")
-                continue
-            else:
-                # unknown / matcher error: treat same as brand_level rather than leaking raw candidate
-                block["product_name"] = None
-                out.append(block)
-        return out
-
-    # ─────────── Content text building ───────────
-
     def build_content_text(self, block):
         """Return only natural-language marketing prose from the page.
         No metadata labels (Brand:, Product:, Flavors: etc) - those live in JSON cols.
@@ -379,8 +295,6 @@ class MarketingAssetExtractor:
             content_text = self.build_content_text(block)
             if not content_text or len(content_text) < 20:
                 continue
-            # Matched subcategory overrides path-derived category; fall back to path
-            row_category = block.get("_matched_subcategory") or block.get("_matched_category") or category
             row = {
                 "source_document":              page_data["source_document"],
                 "source_path":                  source_path,
@@ -388,9 +302,8 @@ class MarketingAssetExtractor:
                 "brand":                        brand,
                 "state":                        state,
                 "state_list":                   state_list,
-                "category":                     row_category,
+                "category":                     category,
                 "campaign":                     product,
-                "product_name":                 block.get("product_name"),
                 "asset_type":                   asset_type,
                 "content_type":                 block.get("content_type"),
                 "content_text":                 content_text,
@@ -416,61 +329,6 @@ class MarketingAssetExtractor:
 
     # ─────────── Entry point ───────────
 
-    def resolve_file_level_sku(self, filename: str, asset_type: str, brand: str,
-                                 primary_product: str) -> Optional[Dict[str, Any]]:
-        """For single-SKU files (sell sheets, postcards, table tents with specific variants),
-        resolve the SKU once from the filename and reuse for every block. Returns None for
-        multi-SKU files (training decks, partner guides, launch decks, 'combined' files) so
-        the parser falls back to per-block matching.
-        """
-        if not filename:
-            return None
-
-        # Multi-SKU asset types - these intentionally cover multiple products per file
-        multi_sku_asset_types = {"training deck", "partner guide", "launch deck", "education", "deck"}
-        if asset_type and asset_type.lower().strip() in multi_sku_asset_types:
-            return None
-
-        # Strip extension, version suffixes, asset-type words from filename
-        stem = filename.rsplit(".", 1)[0]
-        # 'Combined' files cover multiple SKUs
-        if "combined" in stem.lower():
-            return None
-
-        # Build a clean descriptor: drop brand/state code prefix and asset-type/version words
-        descriptor = stem
-        # Strip common prefix patterns like "HH_NY_" or "HH_CA_"
-        descriptor = re.sub(r"^HH[_ ]?[A-Z]{2}[_ ]?", "", descriptor, flags=re.IGNORECASE)
-        # Strip asset-type and trailing version words
-        strip_words = [
-            "sell sheet", "sellsheet", "postcard", "post card",
-            "tabletent", "table tent", "tradeshow", "trade show",
-            "partner guide", "partnerguide", "training deck", "launch deck",
-            "withcrops", "with crops", "crops", "final", "draft",
-        ]
-        for w in strip_words:
-            descriptor = re.sub(re.escape(w), " ", descriptor, flags=re.IGNORECASE)
-        # Strip version numbers like "_1.2", "_v3", "_1.1"
-        descriptor = re.sub(r"[_ ]+v?\d+(\.\d+)*", " ", descriptor)
-        # Replace separators with spaces
-        descriptor = re.sub(r"[_\-&]+", " ", descriptor)
-        descriptor = re.sub(r"\s+", " ", descriptor).strip()
-
-        if len(descriptor) < 3:
-            return None
-
-        verdict = self._call_matcher(
-            brand=brand,
-            candidate=descriptor,
-            context=f"DOCUMENT: {filename}",
-            content_type="file_level",
-            primary_product=primary_product,
-        )
-        if verdict.get("decision") == "matched":
-            logger.info(f"file-level SKU resolved: {filename!r} -> {verdict.get('product_name')!r}")
-            return verdict
-        return None
-
     def process_pdf_bytes(self, pdf_bytes, filename, brand, state, category=None, product=None,
                          asset_type=None, source_path=None, state_list=None, is_multistate=False,
                          auto_provision=True):
@@ -483,30 +341,9 @@ class MarketingAssetExtractor:
         if not pages:
             return {"brand": brand, "state": state, "silo_table": silo_table, "pages": 0, "blocks_saved": 0}
 
-        # File-level SKU resolution: single-SKU files get matched once, applied to all blocks
-        file_verdict = self.resolve_file_level_sku(filename, asset_type or "", brand, product or "")
-
         total_saved = 0
         for page_data in pages:
             blocks = self.extract_all_content(page_data, brand)
-            if not blocks:
-                continue
-
-            if file_verdict:
-                # Stamp the file-level SKU onto every block, skip per-block matching
-                for block in blocks:
-                    block["_matcher_decision"] = "matched"
-                    block["product_name"] = file_verdict.get("product_line") or file_verdict.get("product_name")
-                    block["_matched_inventory_id"] = file_verdict.get("inventory_id")
-                    block["_matched_subcategory"] = file_verdict.get("subcategory")
-                    block["_matched_category"] = file_verdict.get("category")
-            else:
-                # Fall back to per-block matching for multi-SKU files
-                blocks = self.match_blocks(
-                    blocks, brand, page_data.get("text", ""),
-                    filename=filename, primary_product=product or "",
-                )
-
             if not blocks:
                 continue
             total_saved += self.save_to_silo(
@@ -517,5 +354,4 @@ class MarketingAssetExtractor:
             time.sleep(0.3)
 
         return {"brand": brand, "state": state, "silo_table": silo_table,
-                "pages": len(pages), "blocks_saved": total_saved,
-                "file_level_match": file_verdict.get("inventory_id") if file_verdict else None}
+                "pages": len(pages), "blocks_saved": total_saved}
