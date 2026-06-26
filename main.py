@@ -126,6 +126,7 @@ async def parse_upload(
     state_list: Optional[str] = Form(None),
     is_multistate: bool = Form(False),
     auto_provision: bool = Form(True),
+    asset_modified_at: Optional[str] = Form(None),
     x_api_key: str = Header(default=""),
 ):
     """Multipart-upload version of /parse. Skips base64 encoding to avoid n8n's 60s Code-node timeout."""
@@ -144,9 +145,15 @@ async def parse_upload(
         except Exception:
             state_list_parsed = [s.strip() for s in state_list.split(",") if s.strip()]
 
+    # Normalize asset_modified_at: accept ISO-8601 string (Dropbox format like "2026-04-12T22:14:33Z")
+    # and pass through as-is; Supabase will parse it into timestamptz. Empty/null → None.
+    asset_modified_at_clean: Optional[str] = None
+    if asset_modified_at and asset_modified_at.strip():
+        asset_modified_at_clean = asset_modified_at.strip()
+
     logger.info(
-        "parse-upload start: filename=%r brand=%r state=%r category=%r product=%r size=%d",
-        filename, brand, state, category, product, len(pdf_bytes),
+        "parse-upload start: filename=%r brand=%r state=%r category=%r product=%r size=%d modified=%r",
+        filename, brand, state, category, product, len(pdf_bytes), asset_modified_at_clean,
     )
 
     try:
@@ -157,6 +164,7 @@ async def parse_upload(
             asset_type=asset_type, source_path=source_path,
             state_list=state_list_parsed, is_multistate=is_multistate,
             auto_provision=auto_provision,
+            asset_modified_at=asset_modified_at_clean,
         )
         return ParseResponse(status="ok", filename=filename,
                              silo_table=result.get("silo_table"),

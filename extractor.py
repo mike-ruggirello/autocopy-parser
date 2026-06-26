@@ -317,7 +317,7 @@ class MarketingAssetExtractor:
     # ─────────── DB write ───────────
 
     def save_to_silo(self, silo_table, blocks, page_data, *, brand, state, category, product,
-                     asset_type, source_path, state_list):
+                     asset_type, source_path, state_list, asset_modified_at=None):
         saved = 0
         url = f"{self.supabase_url}/rest/v1/{silo_table}"
         for block in blocks:
@@ -348,6 +348,7 @@ class MarketingAssetExtractor:
                 "all_product_sizes":            [block.get("unit_size")] if block.get("unit_size") else [],
                 "all_strain_names":             block.get("strains", []),
                 "all_equipment":                block.get("equipment", []),
+                "asset_modified_at":            asset_modified_at,
             }
             r = requests.post(url, headers=self.base_headers, json=row, timeout=30)
             if r.status_code in (200, 201):
@@ -360,7 +361,7 @@ class MarketingAssetExtractor:
 
     def process_pdf_bytes(self, pdf_bytes, filename, brand, state, category=None, product=None,
                          asset_type=None, source_path=None, state_list=None, is_multistate=False,
-                         auto_provision=True):
+                         auto_provision=True, asset_modified_at=None):
         silo_table = self.get_or_create_silo(brand=brand, state=state, is_multistate=is_multistate,
                                               state_list=state_list, auto_provision=auto_provision)
         if not silo_table:
@@ -379,6 +380,7 @@ class MarketingAssetExtractor:
                 silo_table=silo_table, blocks=blocks, page_data=page_data,
                 brand=brand, state=state, category=category, product=product,
                 asset_type=asset_type, source_path=source_path, state_list=state_list,
+                asset_modified_at=asset_modified_at,
             )
             time.sleep(0.3)
 
